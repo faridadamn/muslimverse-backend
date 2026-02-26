@@ -27,9 +27,11 @@ func GetTodayTracker(c *gin.Context) {
 	}
 
 	today := time.Now().Format("2006-01-02")
+	log.Printf("🔍 GetTodayTracker - User: %s, Today: %s", userID, today)
 
-	// Cek apakah sudah ada data hari ini
+	// Query ke Supabase
 	url := config.SupabaseURL + "/rest/v1/shalat_tracker?user_id=eq." + userID.(string) + "&tanggal=eq." + today
+	log.Printf("📤 Query URL: %s", url)
 
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("apikey", config.SupabaseKey)
@@ -38,58 +40,96 @@ func GetTodayTracker(c *gin.Context) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("❌ Error query Supabase: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 
+	// Baca response body
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	log.Printf("📥 Raw Supabase response: %s", string(bodyBytes))
+	log.Printf("📥 Status code: %d", resp.StatusCode)
+
+	// Parse JSON
 	var trackers []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&trackers)
-
-	// Jika belum ada, buat baru
-	if len(trackers) == 0 {
-		newTracker := map[string]interface{}{
-			"user_id": userID.(string),
-			"tanggal": today,
-			"subuh":   false,
-			"dzuhur":  false,
-			"ashar":   false,
-			"maghrib": false,
-			"isya":    false,
-		}
-
-		insertJSON, _ := json.Marshal(newTracker)
-		insertReq, _ := http.NewRequest("POST", config.SupabaseURL+"/rest/v1/shalat_tracker", strings.NewReader(string(insertJSON)))
-		insertReq.Header.Set("Content-Type", "application/json")
-		insertReq.Header.Set("apikey", config.SupabaseKey)
-		insertReq.Header.Set("Authorization", "Bearer "+config.SupabaseKey)
-
-		insertResp, _ := client.Do(insertReq)
-		defer insertResp.Body.Close()
-
-		var newTrackers []map[string]interface{}
-		json.NewDecoder(insertResp.Body).Decode(&newTrackers)
-
-		if len(newTrackers) > 0 {
-			c.JSON(http.StatusOK, gin.H{
-				"status": "success",
-				"data":   newTrackers[0],
-			})
-			return
-		}
-	}
-
-	if len(trackers) > 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"status": "success",
-			"data":   trackers[0],
-		})
-	} else {
+	err = json.Unmarshal(bodyBytes, &trackers)
+	if err != nil {
+		log.Printf("❌ Error parsing JSON: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"status": "success",
 			"data":   nil,
 		})
+		return
 	}
+
+	log.Printf("📊 Number of trackers found: %d", len(trackers))
+
+	// Jika ada data, return data pertama
+	if len(trackers) > 0 {
+		log.Printf("✅ Data ditemukan: %v", trackers[0])
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"data":   trackers[0],
+		})
+		return
+	}
+
+	// Jika tidak ada data, buat baru
+	log.Printf("📝 Data tidak ditemukan, membuat tracker baru...")
+
+	newTracker := map[string]interface{}{
+		"user_id":    userID.(string),
+		"tanggal":    today,
+		"subuh":      false,
+		"dzuhur":     false,
+		"ashar":      false,
+		"maghrib":    false,
+		"isya":       false,
+		"created_at": time.Now().Format(time.RFC3339),
+		"updated_at": time.Now().Format(time.RFC3339),
+	}
+
+	insertJSON, _ := json.Marshal(newTracker)
+	insertURL := config.SupabaseURL + "/rest/v1/shalat_tracker"
+
+	insertReq, _ := http.NewRequest("POST", insertURL, bytes.NewBuffer(insertJSON))
+	insertReq.Header.Set("Content-Type", "application/json")
+	insertReq.Header.Set("apikey", config.SupabaseKey)
+	insertReq.Header.Set("Authorization", "Bearer "+config.SupabaseKey)
+	insertReq.Header.Set("Prefer", "return=representation") // Penting! Minta data kembali
+
+	insertResp, err := client.Do(insertReq)
+	if err != nil {
+		log.Printf("❌ Error insert: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"data":   nil,
+		})
+		return
+	}
+	defer insertResp.Body.Close()
+
+	insertBody, _ := io.ReadAll(insertResp.Body)
+	log.Printf("📥 Insert response: %s", string(insertBody))
+	log.Printf("📥 Insert status: %d", insertResp.StatusCode)
+
+	var newTrackers []map[string]interface{}
+	json.Unmarshal(insertBody, &newTrackers)
+
+	if len(newTrackers) > 0 {
+		log.Printf("✅ Berhasil membuat tracker baru: %v", newTrackers[0])
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"data":   newTrackers[0],
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+		"data":   nil,
+	})
 }
 
 func UpdateShalat(c *gin.Context) {
