@@ -97,7 +97,13 @@ func GetTodayTracker(c *gin.Context) {
 	insertReq.Header.Set("Content-Type", "application/json")
 	insertReq.Header.Set("apikey", config.SupabaseKey)
 	insertReq.Header.Set("Authorization", "Bearer "+config.SupabaseKey)
-	insertReq.Header.Set("Prefer", "return=representation") // Penting! Minta data kembali
+	insertReq.Header.Set("Prefer", "return=representation")
+
+	// Logging untuk melihat response lengkap
+	log.Printf("📤 Insert URL: %s", insertURL)
+	log.Printf("📤 Insert Headers: apikey=%s, Authorization=Bearer %s",
+		config.SupabaseKey[:10]+"...",
+		config.SupabaseKey[:10]+"...")
 
 	insertResp, err := client.Do(insertReq)
 	if err != nil {
@@ -111,14 +117,23 @@ func GetTodayTracker(c *gin.Context) {
 	defer insertResp.Body.Close()
 
 	insertBody, _ := io.ReadAll(insertResp.Body)
-	log.Printf("📥 Insert response: %s", string(insertBody))
-	log.Printf("📥 Insert status: %d", insertResp.StatusCode)
+	log.Printf("📥 Insert response status: %d", insertResp.StatusCode)
+	log.Printf("📥 Insert response headers: %v", insertResp.Header)
+	log.Printf("📥 Insert response body: %s", string(insertBody))
 
+	// Parse hasil insert
 	var newTrackers []map[string]interface{}
-	json.Unmarshal(insertBody, &newTrackers)
+	err = json.Unmarshal(insertBody, &newTrackers)
+	if err != nil {
+		log.Printf("❌ Error parsing insert response: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"status": "success",
+			"data":   nil,
+		})
+		return
+	}
 
 	if len(newTrackers) > 0 {
-		log.Printf("✅ Berhasil membuat tracker baru: %v", newTrackers[0])
 		c.JSON(http.StatusOK, gin.H{
 			"status": "success",
 			"data":   newTrackers[0],
@@ -261,8 +276,6 @@ func GetShalatStats(c *gin.Context) {
 	}
 
 	// Hitung streak dan statistik lainnya
-	// Ini implementasi sederhana, bisa dikembangin
-
 	url := config.SupabaseURL + "/rest/v1/shalat_history?user_id=eq." + userID.(string) + "&order=tanggal.desc"
 
 	req, _ := http.NewRequest("GET", url, nil)
