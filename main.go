@@ -69,5 +69,5 @@ func main() {
 	}
 
 	log.Println("🚀 Server running on port:", port)
-	r.Run("0.0.0.0:" + port) // Biar bisa diakses dari mana aja
+	r.Run(":" + port) // Biar bisa diakses dari mana aja
 }
