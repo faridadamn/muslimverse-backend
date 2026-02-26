@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -98,6 +101,7 @@ func UpdateShalat(c *gin.Context) {
 
 	var req UpdateShalatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("❌ Error binding JSON: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -109,11 +113,14 @@ func UpdateShalat(c *gin.Context) {
 		"subuh": true, "dzuhur": true, "ashar": true, "maghrib": true, "isya": true,
 	}
 	if !validShalat[req.Shalat] {
+		log.Printf("❌ Invalid shalat name: %s", req.Shalat)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Nama shalat tidak valid"})
 		return
 	}
 
-	// Update data
+	log.Printf("📝 Update request - User: %s, Shalat: %s, Status: %v", userID, req.Shalat, req.Status)
+
+	// PAKAI REST API LANGSUNG
 	url := config.SupabaseURL + "/rest/v1/shalat_tracker?user_id=eq." + userID.(string) + "&tanggal=eq." + today
 
 	updateData := map[string]interface{}{
@@ -121,22 +128,51 @@ func UpdateShalat(c *gin.Context) {
 		"updated_at": time.Now().Format(time.RFC3339),
 	}
 
-	updateJSON, _ := json.Marshal(updateData)
-
-	updateReq, _ := http.NewRequest("PATCH", url, strings.NewReader(string(updateJSON)))
-	updateReq.Header.Set("Content-Type", "application/json")
-	updateReq.Header.Set("apikey", config.SupabaseKey)
-	updateReq.Header.Set("Authorization", "Bearer "+config.SupabaseKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(updateReq)
+	updateJSON, err := json.Marshal(updateData)
 	if err != nil {
+		log.Printf("❌ Error marshal JSON: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	log.Printf("📤 Sending to Supabase: %s", string(updateJSON))
+
+	// PATCH request ke Supabase
+	client := &http.Client{}
+	reqPatch, err := http.NewRequest("PATCH", url, bytes.NewBuffer(updateJSON))
+	if err != nil {
+		log.Printf("❌ Error creating request: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	reqPatch.Header.Set("Content-Type", "application/json")
+	reqPatch.Header.Set("apikey", config.SupabaseKey)
+	reqPatch.Header.Set("Authorization", "Bearer "+config.SupabaseKey)
+
+	resp, err := client.Do(reqPatch)
+	if err != nil {
+		log.Printf("❌ Error update Supabase: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	defer resp.Body.Close()
 
-	// Catat ke history
+	// BACA RESPONSE BODY DARI SUPABASE
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("📥 Supabase response code: %d", resp.StatusCode)
+	log.Printf("📥 Supabase response body: %s", string(respBody))
+
+	if resp.StatusCode >= 400 {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": "Gagal menyimpan ke database",
+			"details": string(respBody),
+		})
+		return
+	}
+
+	// Catat ke history (jalankan di goroutine agar tidak blocking)
 	go recordHistory(userID.(string), req.Shalat, req.Status)
 
 	c.JSON(http.StatusOK, gin.H{
