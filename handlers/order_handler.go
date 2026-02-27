@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,36 +18,67 @@ import (
 func CreateOrder(c *gin.Context) {
 	buyerID, exists := c.Get("user_id")
 	if !exists {
+		log.Println("❌ Unauthorized: user_id not found")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
 	var req models.OrderRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("❌ Error binding JSON: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("📥 Order request: product_id=%s, quantity=%d, address=%s",
+		req.ProductID, req.Quantity, req.ShippingAddr)
+
 	// Ambil data produk
 	product, err := getProductByID(req.ProductID)
 	if err != nil {
+		log.Printf("❌ Error getting product %s: %v", req.ProductID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data produk"})
+		return
+	}
+
+	if product == nil {
+		log.Printf("❌ Product not found: %s", req.ProductID)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Produk tidak ditemukan"})
 		return
 	}
 
 	// Cek stok
 	stock, ok := product["stock"].(float64)
-	if !ok || int(stock) < req.Quantity {
+	if !ok {
+		log.Printf("❌ Invalid stock type: %T", product["stock"])
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data stok tidak valid"})
+		return
+	}
+
+	if int(stock) < req.Quantity {
+		log.Printf("❌ Insufficient stock: requested %d, available %d", req.Quantity, int(stock))
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Stok tidak cukup"})
 		return
 	}
 
-	sellerID, _ := product["seller_id"].(string)
+	sellerID, ok := product["seller_id"].(string)
+	if !ok {
+		log.Printf("❌ Invalid seller_id type: %T", product["seller_id"])
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data penjual tidak valid"})
+		return
+	}
+
 	productName, _ := product["name"].(string)
-	price, _ := product["price"].(float64)
+	price, ok := product["price"].(float64)
+	if !ok {
+		log.Printf("❌ Invalid price type: %T", product["price"])
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Data harga tidak valid"})
+		return
+	}
 
 	// Hitung total
 	totalPrice := int(price) * req.Quantity
+	log.Printf("✅ Product valid: %s, price: %f, total: %d", productName, price, totalPrice)
 
 	// Buat order
 	order := map[string]interface{}{
@@ -63,8 +96,9 @@ func CreateOrder(c *gin.Context) {
 	}
 
 	orderJSON, _ := json.Marshal(order)
+	log.Printf("📤 Inserting order: %s", string(orderJSON))
 
-	// Insert order
+	// Insert order ke Supabase
 	client := &http.Client{}
 	reqInsert, _ := http.NewRequest("POST", config.SupabaseURL+"/rest/v1/orders", strings.NewReader(string(orderJSON)))
 	reqInsert.Header.Set("Content-Type", "application/json")
@@ -74,26 +108,52 @@ func CreateOrder(c *gin.Context) {
 
 	resp, err := client.Do(reqInsert)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		log.Printf("❌ Error inserting order: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menyimpan order"})
 		return
 	}
 	defer resp.Body.Close()
 
+	// Baca response
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("📥 Supabase insert response code: %d", resp.StatusCode)
+	log.Printf("📥 Supabase insert response body: %s", string(respBody))
+
+	if resp.StatusCode >= 400 {
+		log.Printf("❌ Supabase error: %s", string(respBody))
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Gagal membuat order",
+			"details": string(respBody),
+		})
+		return
+	}
+
+	// Parse hasil insert
 	var result []map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	err = json.Unmarshal(respBody, &result)
+	if err != nil {
+		log.Printf("❌ Error parsing insert response: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal parse response"})
+		return
+	}
+
+	if len(result) == 0 {
+		log.Printf("❌ No data returned from insert")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal membuat order"})
+		return
+	}
 
 	// Kurangi stok produk
-	updateStock(product, req.ProductID, int(stock)-req.Quantity)
+	newStock := int(stock) - req.Quantity
+	log.Printf("📦 Updating stock for product %s from %d to %d", req.ProductID, int(stock), newStock)
+	go updateStock(product, req.ProductID, newStock)
 
-	if len(result) > 0 {
-		c.JSON(http.StatusCreated, gin.H{
-			"status":  "success",
-			"message": "Order berhasil dibuat",
-			"data":    result[0],
-		})
-	} else {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal membuat order"})
-	}
+	log.Printf("✅ Order created successfully: %s", result[0]["id"])
+	c.JSON(http.StatusCreated, gin.H{
+		"status":  "success",
+		"message": "Order berhasil dibuat",
+		"data":    result[0],
+	})
 }
 
 // GetMyOrders - Ambil order user (sebagai pembeli)
