@@ -148,7 +148,11 @@ func CreateOrder(c *gin.Context) {
 	log.Printf("📦 Updating stock for product %s from %d to %d", req.ProductID, int(stock), newStock)
 	go updateStock(product, req.ProductID, newStock)
 
-	log.Printf("✅ Order created successfully: %s", result[0]["id"])
+	// Kirim notifikasi ke penjual (dipisah dari response)
+	orderID := result[0]["id"].(string)
+	go sendNewOrderNotification(sellerID, orderID, productName, req.Quantity, totalPrice)
+
+	log.Printf("✅ Order created successfully: %s", orderID)
 	c.JSON(http.StatusCreated, gin.H{
 		"status":  "success",
 		"message": "Order berhasil dibuat",
@@ -328,7 +332,15 @@ func UpdateOrderStatus(c *gin.Context) {
 	})
 }
 
-// Helper functions
+// ==================== HELPER FUNCTIONS ====================
+
+// Fungsi helper untuk notifikasi (DILUAR CreateOrder)
+func sendNewOrderNotification(sellerID, orderId, productName string, quantity, totalPrice int) {
+	// TODO: Kirim notifikasi via FCM atau OneSignal
+	log.Printf("📱 Notifikasi: Pesanan baru untuk penjual %s - %s x%d (Total: %d)",
+		sellerID, productName, quantity, totalPrice)
+}
+
 func getProductByID(productID string) (map[string]interface{}, error) {
 	url := config.SupabaseURL + "/rest/v1/products?id=eq." + productID
 	client := &http.Client{}
